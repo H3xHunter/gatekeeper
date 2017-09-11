@@ -35,7 +35,6 @@
 #define GK_CONFIGURED_IPV6 (2)
 
 #define IPv6_DEFAULT_VTC_FLOW   (0x60000000)
-#define IPv6_DEFAULT_HOP_LIMITS (0xFF)
 
 struct ipaddr {
 	/* The network layer protocol of the nexthop. */
@@ -261,6 +260,11 @@ struct net_config {
 	unsigned             mailbox_max_entries;
 	unsigned             mailbox_mem_cache_size;
 	unsigned             mailbox_burst_size;
+
+	/* Number of attempts to wait for a link to come up. */
+	uint8_t              num_attempts_link_get;
+
+	uint8_t              ipv6_default_hop_limits;
 
 	/*
 	 * The fields below are for internal use.

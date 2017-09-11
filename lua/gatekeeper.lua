@@ -127,6 +127,8 @@ struct net_config {
 	unsigned mailbox_max_entries;
 	unsigned mailbox_mem_cache_size;
 	unsigned mailbox_burst_size;
+	uint8_t  num_attempts_link_get;
+	uint8_t  ipv6_default_hop_limits;
 	/* This struct has hidden fields. */
 };
 

@@ -5,6 +5,9 @@ return function (gatekeeper_server)
 	-- Change these parameters to configure the network.
 	--
 
+	local num_attempts_link_get = 5
+	local ipv6_default_hop_limits = 255
+
 	local front_ports = {"enp133s0f0"}
 	-- Each interface should have at most two ip addresses:
 	-- 1 IPv4, 1 IPv6.
@@ -33,6 +36,8 @@ return function (gatekeeper_server)
 	net_conf.mailbox_max_entries = mailbox_max_entries
 	net_conf.mailbox_mem_cache_size = mailbox_mem_cache_size
 	net_conf.mailbox_burst_size = mailbox_burst_size
+	net_conf.num_attempts_link_get = num_attempts_link_get
+	net_conf.ipv6_default_hop_limits = ipv6_default_hop_limits
 
 	local front_iface = gatekeeper.c.get_if_front(net_conf)
 	front_iface.arp_cache_timeout_sec = front_arp_cache_timeout_sec
