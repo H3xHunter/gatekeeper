@@ -814,6 +814,82 @@ add_ggu_policy(struct ggu_policy *policy,
 	}
 }
 
+/*
+ * When a network administrator changes a policy in response to an attack,
+ * she may need to flush all policy decisions cached at the Gatekeeper servers
+ * associated to a given destination prefix in order to quickly re-establish the
+ * network. Function flush_ggu_policy() supports these flush requests.
+ */
+static void
+flush_ggu_policy(struct ggu_policy *policy, struct gk_instance *instance)
+{
+	uint32_t next = 0;
+	int32_t index;
+	const struct ip_flow *key;
+	void *data;
+	struct in_addr ip4_mask;
+	struct in6_addr ip6_mask;
+
+	memset(&ip4_mask, 0, sizeof(ip4_mask));
+	memset(&ip6_mask, 0, sizeof(ip6_mask));
+
+	if (policy->flow.proto == ETHER_TYPE_IPv4) {
+		ip4_mask.s_addr =
+			rte_cpu_to_be_32(~0ULL << (32 - policy->prefix_len));
+	} else if (likely(policy->flow.proto == ETHER_TYPE_IPv6)) {
+		uint64_t *paddr = (uint64_t *)ip6_mask.s6_addr;
+		if (policy->prefix_len == 0) {
+			paddr[0] = 0ULL;
+			paddr[1] = 0ULL;
+		} else if (policy->prefix_len <= 64) {
+			paddr[0] = rte_cpu_to_be_64(
+				~0ULL << (64 - policy->prefix_len));
+			paddr[1] = 0ULL;
+		} else {
+			paddr[0] = ~0ULL;
+			paddr[1] = rte_cpu_to_be_64(
+				~0ULL << (128 - policy->prefix_len));
+		}
+	} else {
+		RTE_LOG(WARNING, GATEKEEPER,
+			"gk: received flow flushing policy with unknown IP type %u\n",
+			policy->flow.proto);
+		return;
+	}
+
+	index = rte_hash_iterate(instance->ip_flow_hash_table,
+		(void *)&key, &data, &next);
+	while (index >= 0) {
+		struct flow_entry *fe =
+			&instance->ip_flow_entry_table[index];
+		const uint64_t *paddr_p =
+			(const uint64_t *)policy->flow.f.v6.dst;
+		const uint64_t *pmask_p = (const uint64_t *)ip6_mask.s6_addr;
+		const uint64_t *paddr_f = (const uint64_t *)fe->flow.f.v6.dst;
+
+		if (policy->flow.proto != fe->flow.proto)
+			goto next;
+
+		if ((policy->flow.proto == ETHER_TYPE_IPv4 &&
+				!((policy->flow.f.v4.dst ^ fe->flow.f.v4.dst)
+				& ip4_mask.s_addr)) ||
+				(policy->flow.proto == ETHER_TYPE_IPv6 &&
+				!((paddr_f[0] ^ paddr_p[0]) & pmask_p[0]) &&
+				!((paddr_f[1] ^ paddr_p[1]) & pmask_p[1]))) {
+			gk_del_flow_entry_from_hash(
+				instance->ip_flow_hash_table, fe);
+		}
+
+next:
+		index = rte_hash_iterate(instance->ip_flow_hash_table,
+			(void *)&key, &data, &next);
+	}
+
+	RTE_LOG(NOTICE, GATEKEEPER,
+		"gk: finished flushing flow table at %s with lcore %u\n",
+		__func__, rte_lcore_id());
+}
+
 static void
 gk_synchronize(struct gk_fib *fib, struct gk_instance *instance)
 {
@@ -841,8 +917,8 @@ gk_synchronize(struct gk_fib *fib, struct gk_instance *instance)
 		}
 
 		RTE_LOG(NOTICE, GATEKEEPER,
-			"gk: finished flushing flow table at lcore %u\n",
-			rte_lcore_id());
+			"gk: finished flushing flow table at %s with lcore %u\n",
+			__func__, rte_lcore_id());
 
 		break;
 	}
@@ -878,6 +954,10 @@ process_gk_cmd(struct gk_cmd_entry *entry,
 	switch (entry->op) {
 	case GGU_POLICY_ADD:
 		add_ggu_policy(&entry->u.ggu, instance, gk_conf);
+		break;
+
+	case GGU_POLICY_FLUSH:
+		flush_ggu_policy(&entry->u.ggu, instance);
 		break;
 
 	case GK_SYNCH_WITH_LPM:

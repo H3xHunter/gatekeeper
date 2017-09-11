@@ -23,7 +23,7 @@
 #include "gatekeeper_net.h"
 #include "gatekeeper_flow.h"
 
-#define GGU_PD_VER1 (1)
+#define GGU_PD_VER (2)
 
 /* Configuration for the GK-GT Unit functional block. */
 struct ggu_config {
@@ -54,15 +54,17 @@ struct ggu_config {
  *
  * Packet format: Ethernet headers + IP header + UDP header + Data.
  * In the UDP payload, the following format would save a lot of bytes
- * when there are decline decisions:
- *  v1, n1, n2, n3, n4: Each of these fields are 1-byte long.
- *  v1 is a constant indicating the version of the format, in this case 1.
+ * when there are decline/flush decisions:
+ *  ver, n1, n2, n3, n4: Each of these fields are 1-byte long.
+ *  ver is a constant indicating the version of the format, in this case 1.
  *  n1 is the number of IPv4 decline decisions.
  *  n2 is the number of IPv6 decline decisions.
  *  n3 is the number of IPv4 granted decisions.
  *  n4 is the number of IPv6 granted decisions.
+ *  n5 is the number of IPv4 flush decisions.
+ *  n6 is the number of IPv6 flsuh decisions.
  * 
- * Field v1 will enable us to change the format, incrementally update
+ * Field ver will enable us to change the format, incrementally update
  * the Gatekeeper servers, and incrementally update the Grantor servers.
  *
  * Notice that, to guarantee that all the accesses after struct ggu_common_hdr
@@ -70,17 +72,27 @@ struct ggu_config {
  * of struct ggu_common_hdr.
  */
 struct ggu_common_hdr {
-	uint8_t v1;
+	uint8_t ver;
 	uint8_t n1;
 	uint8_t n2;
 	uint8_t n3;
 	uint8_t n4;
-	uint8_t reserved[3];
+	uint8_t n5;
+	uint8_t n6;
+	uint8_t reserved;
 }__attribute__((packed));
 
 struct ggu_policy {
 	uint8_t  state;
+
+	/*
+	 * In case of flushing policy decisions,
+	 * only the destination will be used.
+	 */
 	struct ip_flow flow;
+
+	/* This field is used only in case of flushing policy decisions. */
+	uint8_t prefix_len;
 
 	struct {
 		/*

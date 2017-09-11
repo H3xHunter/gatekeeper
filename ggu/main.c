@@ -47,29 +47,30 @@ filter_name(const struct gatekeeper_if *iface)
 }
 
 static void
-process_single_policy(const struct ggu_policy *policy, const struct ggu_config *ggu_conf)
+process_single_policy(
+	const struct ggu_policy *policy, const struct ggu_config *ggu_conf)
 {
 	struct gk_cmd_entry *entry;
-	/*
-	 * Obtain mailbox of that GK block,
-	 * and send the policy decision to the GK block.
-	 */
-	struct mailbox *mb =
-		get_responsible_gk_mailbox(&policy->flow, ggu_conf->gk);
-
-	if (mb == NULL)
-		return;
-
-	entry = mb_alloc_entry(mb);
-	if (entry == NULL)
-		return;
-
-	entry->op = GGU_POLICY_ADD;
-	entry->u.ggu.state = policy->state;
-	rte_memcpy(&entry->u.ggu.flow, &policy->flow, sizeof(entry->u.ggu.flow));
 
 	switch(policy->state) {
-	case GK_GRANTED:
+	case GK_GRANTED: {
+		/*
+		 * Obtain mailbox of that GK block,
+		 * and send the policy decision to the GK block.
+		 */
+		struct mailbox *mb = get_responsible_gk_mailbox(
+			&policy->flow, ggu_conf->gk);
+		if (mb == NULL)
+			return;
+
+		entry = mb_alloc_entry(mb);
+		if (entry == NULL)
+			return;
+
+		entry->op = GGU_POLICY_ADD;
+		entry->u.ggu.state = policy->state;
+		rte_memcpy(&entry->u.ggu.flow,
+			&policy->flow, sizeof(entry->u.ggu.flow));
 		entry->u.ggu.params.u.granted.tx_rate_kb_sec =
 			rte_be_to_cpu_32(
 			policy->params.u.granted.tx_rate_kb_sec);
@@ -82,21 +83,60 @@ process_single_policy(const struct ggu_policy *policy, const struct ggu_config *
 		entry->u.ggu.params.u.granted.renewal_step_ms =
 			rte_be_to_cpu_32(
 			policy->params.u.granted.renewal_step_ms);
+		mb_send_entry(mb, entry);
 		break;
+	}
 
-	case GK_DECLINED:
+	case GK_DECLINED: {
+		/*
+		 * Obtain mailbox of that GK block,
+		 * and send the policy decision to the GK block.
+		 */
+		struct mailbox *mb = get_responsible_gk_mailbox(
+			&policy->flow, ggu_conf->gk);
+		if (mb == NULL)
+			return;
+
+		entry = mb_alloc_entry(mb);
+		if (entry == NULL)
+			return;
+
+		entry->op = GGU_POLICY_ADD;
+		entry->u.ggu.state = policy->state;
+		rte_memcpy(&entry->u.ggu.flow,
+			&policy->flow, sizeof(entry->u.ggu.flow));
 		entry->u.ggu.params.u.declined.expire_sec =
 			rte_be_to_cpu_32(policy->params.u.declined.expire_sec);
+		mb_send_entry(mb, entry);
 		break;
+	}
+
+	case GK_FLUSH: {
+		/* This type is used for flushing policy decisions. */
+		int i;
+
+		for (i = 0; i < ggu_conf->gk->num_lcores; i++) {
+			entry = mb_alloc_entry(&ggu_conf->gk->instances[i].mb);
+			if (entry == NULL) {
+				RTE_LOG(WARNING, GATEKEEPER, "ggu: failed to allocate an entry from its mailbox\n");
+				continue;
+			}
+
+			entry->op = GGU_POLICY_FLUSH;
+			rte_memcpy(&entry->u.ggu.flow,
+				&policy->flow, sizeof(entry->u.ggu.flow));
+			entry->u.ggu.prefix_len = policy->prefix_len;
+			mb_send_entry(&ggu_conf->gk->instances[i].mb, entry);
+		}
+
+		break;
+	}
 
 	default:
 		RTE_LOG(ERR, GATEKEEPER, "ggu: impossible policy state %hhu\n",
 			policy->state);
-		mb_free_entry(mb, entry);
 		return;
 	}
-
-	mb_send_entry(mb, entry);
 }
 
 static void
@@ -249,10 +289,10 @@ process_single_packet(struct rte_mbuf *pkt, const struct ggu_config *ggu_conf)
 	/* XXX Check the UDP checksum. */
 
 	gguhdr = (struct ggu_common_hdr *)&udphdr[1];
-	if (gguhdr->v1 != GGU_PD_VER1) {
+	if (gguhdr->ver != GGU_PD_VER) {
 		RTE_LOG(NOTICE, GATEKEEPER,
 			"ggu: unknown policy decision format %hhu\n",
-			gguhdr->v1);
+			gguhdr->ver);
 		goto free_packet;
 	}
 
@@ -262,6 +302,9 @@ process_single_packet(struct rte_mbuf *pkt, const struct ggu_config *ggu_conf)
 	expected_payload_len = sizeof(*udphdr) + sizeof(*gguhdr) +
 		(gguhdr->n1 + gguhdr->n3) * sizeof(policy.flow.f.v4) +
 		(gguhdr->n2 + gguhdr->n4) * sizeof(policy.flow.f.v6) +
+		gguhdr->n5 * sizeof(policy.flow.f.v4.dst) +
+		gguhdr->n6 * sizeof(policy.flow.f.v6.dst) +
+		(gguhdr->n5 + gguhdr->n6) * sizeof(policy.prefix_len) +
 		(gguhdr->n1 + gguhdr->n2) * sizeof(policy.params.u.declined) + 
 		(gguhdr->n3 + gguhdr->n4) * sizeof(policy.params.u.granted);
 	if (real_payload_len < expected_payload_len) {
@@ -321,6 +364,31 @@ process_single_packet(struct rte_mbuf *pkt, const struct ggu_config *ggu_conf)
 		rte_memcpy(&policy.params.u.granted, policy_ptr,
 			sizeof(policy.params.u.granted));
 		policy_ptr += sizeof(policy.params.u.granted);
+		process_single_policy(&policy, ggu_conf);
+	}
+
+	/* Process the IPv4 flushing decisions. */
+	policy.state = GK_FLUSH;
+	policy.flow.proto = ETHER_TYPE_IPv4;
+	for (j = 0; j < gguhdr->n5; j++) {
+		rte_memcpy(&policy.flow.f.v4.dst, policy_ptr,
+			sizeof(policy.flow.f.v4.dst));
+		policy_ptr += sizeof(policy.flow.f.v4.dst);
+		rte_memcpy(&policy.prefix_len, policy_ptr,
+			sizeof(policy.prefix_len));
+		policy_ptr += sizeof(policy.prefix_len);
+		process_single_policy(&policy, ggu_conf);
+	}
+
+	/* Process the IPv6 flushing decisions. */
+	policy.flow.proto = ETHER_TYPE_IPv6;
+	for (j = 0; j < gguhdr->n6; j++) {
+		rte_memcpy(&policy.flow.f.v6.dst, policy_ptr,
+			sizeof(policy.flow.f.v6.dst));
+		policy_ptr += sizeof(policy.flow.f.v6.dst);
+		rte_memcpy(&policy.prefix_len, policy_ptr,
+			sizeof(policy.prefix_len));
+		policy_ptr += sizeof(policy.prefix_len);
 		process_single_policy(&policy, ggu_conf);
 	}
 

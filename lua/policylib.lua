@@ -12,7 +12,8 @@ ffi.cdef[[
 enum gk_flow_state {
 	GK_REQUEST,
 	GK_GRANTED,
-	GK_DECLINED
+	GK_DECLINED,
+	GK_FLUSH
 };
 
 enum protocols {
@@ -94,6 +95,7 @@ struct ip_flow {
 struct ggu_policy {
 	uint8_t  state;
 	struct ip_flow flow;
+	uint8_t prefix_len;
 
 	struct {
 		union {

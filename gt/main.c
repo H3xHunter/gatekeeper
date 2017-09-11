@@ -705,7 +705,7 @@ alloc_and_fill_notify_pkt(unsigned int socket, struct ggu_policy *policy,
 
 	/* Fill up the policy decision. */
 	memset(notify_ggu, 0, sizeof(*notify_ggu));
-	notify_ggu->v1 = GGU_PD_VER1;
+	notify_ggu->ver = GGU_PD_VER;
 	if (policy->flow.proto == ETHER_TYPE_IPv4
 			&& policy->state == GK_DECLINED) {
 		notify_ggu->n1 = 1;
@@ -750,6 +750,26 @@ alloc_and_fill_notify_pkt(unsigned int socket, struct ggu_policy *policy,
 		rte_memcpy(data + sizeof(policy->flow.f.v6),
 			&policy->params.u.granted,
 			sizeof(policy->params.u.granted));
+	} else if (policy->flow.proto == ETHER_TYPE_IPv4
+			&& policy->state == GK_FLUSH) {
+		notify_ggu->n5 = 1;
+		data = (uint8_t *)rte_pktmbuf_append(notify_pkt,
+			sizeof(policy->flow.f.v4.dst) +
+			sizeof(policy->prefix_len));
+		rte_memcpy(data, &policy->flow.f.v4.dst,
+			sizeof(policy->flow.f.v4.dst));
+		rte_memcpy(data + sizeof(policy->flow.f.v4.dst),
+			&policy->prefix_len, sizeof(policy->prefix_len));
+	} else if (policy->flow.proto == ETHER_TYPE_IPv6
+			&& policy->state == GK_FLUSH) {
+		notify_ggu->n6 = 1;
+		data = (uint8_t *)rte_pktmbuf_append(notify_pkt,
+			sizeof(policy->flow.f.v6.dst) +
+			sizeof(policy->prefix_len));
+		rte_memcpy(data, policy->flow.f.v6.dst,
+			sizeof(policy->flow.f.v6.dst));
+		rte_memcpy(data + sizeof(policy->flow.f.v6.dst),
+			&policy->prefix_len, sizeof(policy->prefix_len));
 	} else
 		rte_panic("Unexpected condition: gt fills up a notify packet with unexpected policy state %u\n",
 			policy->state);
