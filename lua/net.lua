@@ -20,11 +20,20 @@ return function (gatekeeper_server)
 	local back_nd_cache_timeout_sec = 7200
 	local back_bonding_mode = gatekeeper.c.BONDING_MODE_ROUND_ROBIN
 
+	-- XXX Sample parameters, need to be tested for better performance.
+	local mailbox_max_entries = 128
+	local mailbox_mem_cache_size = 64
+	local mailbox_burst_size = 32
+
 	--
 	-- Code below this point should not need to be changed.
 	--
 
 	local net_conf = gatekeeper.c.get_net_conf()
+	net_conf.mailbox_max_entries = mailbox_max_entries
+	net_conf.mailbox_mem_cache_size = mailbox_mem_cache_size
+	net_conf.mailbox_burst_size = mailbox_burst_size
+
 	local front_iface = gatekeeper.c.get_if_front(net_conf)
 	front_iface.arp_cache_timeout_sec = front_arp_cache_timeout_sec
 	front_iface.nd_cache_timeout_sec = front_nd_cache_timeout_sec

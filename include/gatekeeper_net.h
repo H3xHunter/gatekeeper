@@ -257,6 +257,11 @@ struct net_config {
 	 */
 	int                  back_iface_enabled;
 
+	/* Parameters to setup the mailbox instance. */
+	unsigned             mailbox_max_entries;
+	unsigned             mailbox_mem_cache_size;
+	unsigned             mailbox_burst_size;
+
 	/*
 	 * The fields below are for internal use.
 	 * Configuration files should not refer to them.

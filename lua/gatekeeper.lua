@@ -123,7 +123,10 @@ struct gatekeeper_if {
 };
 
 struct net_config {
-	int back_iface_enabled;
+	int      back_iface_enabled;
+	unsigned mailbox_max_entries;
+	unsigned mailbox_mem_cache_size;
+	unsigned mailbox_burst_size;
 	/* This struct has hidden fields. */
 };
 
