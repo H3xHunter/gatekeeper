@@ -154,6 +154,8 @@ struct ggu_config {
 struct lls_config {
 	unsigned int lcore_id;
 	int          debug;
+	unsigned     lls_cache_records;
+	unsigned     lls_cache_scan_interval_sec;
 	/* This struct has hidden fields. */
 };
 
