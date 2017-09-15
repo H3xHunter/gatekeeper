@@ -47,7 +47,6 @@
  */
 #define PRIORITY_GRANTED	 (1)
 #define PRIORITY_RENEW_CAP	 (2)
-#define PRIORITY_MAX		 (63)
 
 /* Store information about a packet. */
 struct ipacket {
@@ -326,8 +325,8 @@ gk_process_request(struct flow_entry *fe, struct ipacket *packet,
 	 * 2 for capability renew; 3-63 for requests.
 	 */
 	priority += 3;
-	if (unlikely(priority > PRIORITY_MAX))
-		priority = PRIORITY_MAX;
+	if (unlikely(priority > GK_MAX_REQ_PRIORITY))
+		priority = GK_MAX_REQ_PRIORITY;
 
 	/* The assigned priority is @priority. */
 
