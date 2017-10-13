@@ -34,6 +34,8 @@
 #include "gatekeeper_net.h"
 #include "gatekeeper_launch.h"
 
+#define LOG_FILE_PATH "/var/log/gatekeeper.log"
+
 /* Indicates whether the program needs to exit or not. */
 volatile int exiting = false;
 
@@ -44,6 +46,18 @@ volatile int exiting = false;
 uint64_t cycles_per_sec;
 uint64_t cycles_per_ms;
 uint64_t picosec_per_cycle;
+
+FILE *log_file;
+
+static int
+gatekeeper_log_init(void)
+{
+	log_file = fopen(LOG_FILE_PATH, "w+");
+	if (log_file == NULL)
+		return -1;
+
+	return rte_openlog_stream(log_file);
+}
 
 /* Obtain the system time resolution. */
 static int
@@ -141,10 +155,14 @@ main(int argc, char **argv)
 	/* Used by the LLS block. */
 	rte_timer_subsystem_init();
 
+	ret = gatekeeper_log_init();
+	if (ret < 0)
+		goto out;
+
 	/* Given the nature of signal, it's okay to not have a cleanup for them. */
 	ret = run_signal_handler();
 	if (ret < 0)
-		goto out;
+		goto log;
 
 	/*
 	 * Given the nature of 'clock_gettime()' call, it's okay to not have a 
@@ -152,7 +170,7 @@ main(int argc, char **argv)
 	 */
 	ret = time_resolution_init();
 	if (ret < 0)
-		goto out;
+		goto log;
 
 	ret = config_gatekeeper();
 	if (ret < 0) {
@@ -177,6 +195,11 @@ main(int argc, char **argv)
 	rte_eal_mp_wait_lcore();
 net:
 	gatekeeper_free_network();
+log:
+	if (log_file != NULL) {
+		fclose(log_file);
+		log_file = NULL;
+	}
 out:
 	return ret;
 }
