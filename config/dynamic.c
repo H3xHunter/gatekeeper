@@ -259,6 +259,11 @@ cleanup_dy(struct dynamic_config *dy_conf)
 		dy_conf->gk = NULL;
 	}
 
+	if (dy_conf->gt != NULL) {
+		gt_conf_put(dy_conf->gt);
+		dy_conf->gt = NULL;
+	}
+
 	if (dy_conf->sock_fd != -1) {
 		ret = close(dy_conf->sock_fd);
 		if (ret < 0) {
@@ -464,7 +469,7 @@ set_dyc_timeout(unsigned int sec,
 }
 
 int
-run_dynamic_config(struct gk_config *gk_conf,
+run_dynamic_config(struct gk_config *gk_conf, struct gt_config *gt_conf,
 	const char *server_path, struct dynamic_config *dy_conf)
 {
 	int ret;
@@ -553,24 +558,28 @@ run_dynamic_config(struct gk_config *gk_conf,
 		goto free_sock;
 	}
 
-	/*
-	 * TODO Add support for the dynamic configuration running as Grantor.
-	 */
 	if (gk_conf != NULL)
 		gk_conf_hold(gk_conf);
 	dy_conf->gk = gk_conf;
 
+	if (gt_conf != NULL)
+		gt_conf_hold(gt_conf);
+	dy_conf->gt = gt_conf;
+
 	ret = launch_at_stage3("dynamic_conf",
 		dyn_cfg_proc, dy_conf, dy_conf->lcore_id);
 	if (ret < 0)
-		goto put_gk_config;
+		goto put_gk_gt_config;
 
 	return 0;
 
-put_gk_config:
+put_gk_gt_config:
 	dy_conf->gk = NULL;
 	if (gk_conf != NULL)
 		gk_conf_put(gk_conf);
+	dy_conf->gt = NULL;
+	if (gt_conf != NULL)
+		gt_conf_put(gt_conf);
 free_sock:
 	close(dy_conf->sock_fd);
 	dy_conf->sock_fd = -1;
