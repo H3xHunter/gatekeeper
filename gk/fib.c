@@ -17,6 +17,7 @@
  */
 
 #include <stddef.h>
+#include <arpa/inet.h>
 
 #include "gatekeeper_fib.h"
 #include "gatekeeper_gk.h"
@@ -1622,4 +1623,249 @@ del_fib_entry(const char *ip_prefix, struct gk_config *gk_conf)
 	prefix_info.len = parse_ip_prefix(ip_prefix, &prefix_info.addr);
 
 	return del_fib_entry_numerical(&prefix_info, gk_conf);
+}
+
+static int
+fillup_gk_fib_ether_entry(struct ether_cache *eth_cache,
+	struct gk_fib_ether_entry *entry)
+{
+	entry->stale = eth_cache->stale;
+	rte_memcpy(&entry->nexthop_ip, &eth_cache->ip_addr,
+		sizeof(entry->nexthop_ip));
+	rte_memcpy(&entry->l2_hdr, &eth_cache->l2_hdr, sizeof(entry->l2_hdr));
+	entry->ref_cnt = rte_atomic32_read(&eth_cache->ref_cnt);
+
+	return 0;
+}
+
+static int
+fillup_grantor_fib_dump_entry(
+	struct gk_fib_dump_entry *dentry, struct gk_fib *fib)
+{
+	int ret;
+	struct gk_fib_ether_entry *eth_tbl = rte_calloc(
+		NULL, 1, sizeof(struct gk_fib_ether_entry), 0);
+	if (eth_tbl == NULL)
+		return -1;
+
+	rte_memcpy(&dentry->grantor_ip, &fib->u.grantor.gt_addr,
+		sizeof(dentry->grantor_ip));
+
+	ret = fillup_gk_fib_ether_entry(fib->u.grantor.eth_cache, eth_tbl);
+	if (ret < 0) {
+		rte_free(eth_tbl);
+		return -1;
+	}
+
+	dentry->num_ether_entries = 1;
+	dentry->ether_tbl = eth_tbl;
+
+	return 0;
+}
+
+static int
+fillup_gateway_fib_dump_entry(
+	struct gk_fib_dump_entry *dentry, struct gk_fib *fib)
+{
+	int ret;
+	struct gk_fib_ether_entry *eth_tbl = rte_calloc(
+		NULL, 1, sizeof(struct gk_fib_ether_entry), 0);
+	if (eth_tbl == NULL)
+		return -1;
+
+	ret = fillup_gk_fib_ether_entry(fib->u.gateway.eth_cache, eth_tbl);
+	if (ret < 0) {
+		rte_free(eth_tbl);
+		return -1;
+	}
+
+	dentry->num_ether_entries = 1;
+	dentry->ether_tbl = eth_tbl;
+
+	return 0;
+}
+
+static int
+fillup_neighbor_fib_dump_entry(
+	struct gk_fib_dump_entry *dentry, struct gk_fib *fib)
+{
+	int num_entries = 0;
+	uint32_t next = 0;
+	int32_t index;
+	const void *key;
+	void *data;
+	struct neighbor_hash_table *neigh_ht;
+	struct gk_fib_ether_entry *eth_tbl;
+	struct gk_fib_ether_entry *entry;
+
+	if (dentry->addr.proto == ETHER_TYPE_IPv4)
+		neigh_ht = &fib->u.neigh;
+	else
+		neigh_ht = &fib->u.neigh6;
+
+	eth_tbl = rte_calloc(NULL, neigh_ht->tbl_size,
+		sizeof(struct gk_fib_ether_entry), 0);
+	if (eth_tbl == NULL)
+		return -1;
+
+	index = rte_hash_iterate(neigh_ht->hash_table,
+		(void *)&key, &data, &next);
+	while (index >= 0) {
+		int ret;
+		struct ether_cache *eth_cache = &neigh_ht->cache_tbl[index];
+		entry = &eth_tbl[num_entries++];
+
+		ret = fillup_gk_fib_ether_entry(eth_cache, entry);
+		if (ret < 0) {
+			rte_free(eth_tbl);
+			return -1;
+		}
+
+		index = rte_hash_iterate(neigh_ht->hash_table,
+			(void *)&key, &data, &next);
+	}
+
+	dentry->num_ether_entries = num_entries;
+	dentry->ether_tbl = eth_tbl;
+
+	return 0;
+}
+
+static int
+fillup_gk_fib_dump_entry(struct gk_fib_dump_entry *dentry, struct gk_fib *fib)
+{
+	int ret = -1;
+	dentry->action = fib->action;
+	switch (fib->action) {
+	case GK_FWD_GRANTOR:
+		ret = fillup_grantor_fib_dump_entry(dentry, fib);
+		break;
+
+	case GK_FWD_GATEWAY_FRONT_NET:
+		/* FALLTHROUGH */
+	case GK_FWD_GATEWAY_BACK_NET:
+		ret = fillup_gateway_fib_dump_entry(dentry, fib);
+		break;
+
+	case GK_FWD_NEIGHBOR_FRONT_NET:
+		/* FALLTHROUGH */
+	case GK_FWD_NEIGHBOR_BACK_NET:
+		ret = fillup_neighbor_fib_dump_entry(dentry, fib);
+		break;
+
+	case GK_DROP:
+		ret = 0;
+		break;
+
+	default:
+		rte_panic("Invalid FIB action (%u) at %s with lcore %u\n",
+			fib->action, __func__, rte_lcore_id());
+		break;
+	}
+
+	return ret;
+}
+
+struct gk_fib_dump_entry *
+list_fib_entries(struct gk_config *gk_conf, uint32_t *num_entries)
+{
+	int ret;
+	int index;
+	uint8_t ip6[RTE_LPM6_IPV6_ADDR_SIZE];
+	struct gk_fib *fib;
+	struct gk_lpm *ltbl = &gk_conf->lpm_tbl;
+	unsigned int num_entries_max = gk_conf->max_num_ipv4_rules +
+		gk_conf->max_num_ipv6_rules;
+	struct gk_fib_dump_entry *tbl;
+	const struct rte_lpm_rule *re4;
+	const struct rte_lpm6_rule *re6;
+	struct rte_lpm_iterator_state state;
+	struct rte_lpm6_iterator_state state6;
+
+	ret = rte_lpm_iterator_state_init(ltbl->lpm, 0, 0, &state);
+	if (ret < 0) {
+		RTE_LOG(ERR, GATEKEEPER,
+			"gk: failed to initialize the lpm rule iterator state at %s!\n",
+			__func__);
+		return NULL;
+	}
+
+	memset(ip6, 0, sizeof(ip6));
+	ret = rte_lpm6_iterator_state_init(ltbl->lpm6, ip6, 0, &state6);
+	if (ret < 0) {
+		RTE_LOG(ERR, GATEKEEPER,
+			"gk: failed to initialize the lpm6 rule iterator state at %s!\n",
+			__func__);
+		return NULL;
+	}
+
+	if (num_entries == NULL) {
+		RTE_LOG(ERR, GATEKEEPER,
+			"gk: invalid parameter - num_entries has an NULL pointer at %s!\n",
+			__func__);
+		return NULL;
+	}
+
+	*num_entries = 0;
+
+	tbl = rte_calloc("dump_entry", num_entries_max,
+		sizeof(struct gk_fib_dump_entry), 0);
+	if (tbl == NULL) {
+		RTE_LOG(WARNING, GATEKEEPER,
+			"gk: failed to list FIB entries due to the memory allocation failure at %s!\n",
+			__func__);
+		return NULL;
+	}
+
+	rte_spinlock_lock_tm(&gk_conf->lpm_tbl.lock);
+
+	index = rte_lpm_rule_iterate(&state, &re4);
+	while (index >= 0) {
+		struct gk_fib_dump_entry *dentry = &tbl[*num_entries];
+		dentry->addr.proto = ETHER_TYPE_IPv4;
+		dentry->addr.ip.v4.s_addr = htonl(re4->ip);
+		dentry->len = state.depth;
+		fib = &ltbl->fib_tbl[re4->next_hop];
+		ret = fillup_gk_fib_dump_entry(dentry, fib);
+		if (ret < 0)
+			goto err;
+
+		*num_entries = *num_entries + 1;
+		if (*num_entries >= num_entries_max)
+			break;
+
+		index = rte_lpm_rule_iterate(&state, &re4);
+	}
+
+	index = rte_lpm6_rule_iterate(&state6, &re6);
+	while (index >= 0) {
+		struct gk_fib_dump_entry *dentry;
+
+		if (*num_entries >= num_entries_max)
+			break;
+
+		dentry = &tbl[*num_entries];
+		dentry->addr.proto = ETHER_TYPE_IPv6;
+		rte_memcpy(&dentry->addr.ip.v6, re6->ip,
+			sizeof(dentry->addr.ip.v6));
+		dentry->len = re6->depth;
+		fib = &ltbl->fib_tbl6[re6->next_hop];
+		ret = fillup_gk_fib_dump_entry(dentry, fib);
+		if (ret < 0)
+			goto err;
+
+		*num_entries = *num_entries + 1;
+
+		index = rte_lpm6_rule_iterate(&state6, &re6);
+	}
+
+	rte_spinlock_unlock_tm(&gk_conf->lpm_tbl.lock);
+
+	return tbl;
+
+err:
+	rte_spinlock_unlock_tm(&gk_conf->lpm_tbl.lock);
+	rte_free(tbl);
+
+	return NULL;
 }

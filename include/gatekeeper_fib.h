@@ -165,6 +165,42 @@ struct gk_fib {
 	} u;
 };
 
+struct gk_fib_ether_entry {
+
+	bool          stale;
+
+	/* The IP address of the nexthop. */
+	struct ipaddr nexthop_ip;
+
+	uint32_t      ref_cnt;
+
+	/* The whole link-layer header. */
+	struct {
+		/* Ethernet header (required). */
+		struct ether_hdr eth_hdr;
+		/* VLAN header (optional). */
+		struct vlan_hdr  vlan_hdr;
+	} __attribute__((packed)) l2_hdr;
+};
+
+struct gk_fib_dump_entry {
+
+	/* The IP prefix. */
+	struct ipaddr addr;
+
+	int           len;
+
+	/* The Grantor IP address. */
+	struct ipaddr grantor_ip;
+
+	uint16_t      num_ether_entries;
+
+	/* The fib action. */
+	enum gk_fib_action action;
+
+	struct gk_fib_ether_entry *ether_tbl;
+};
+
 /* Structure for the GK global LPM table. */
 struct gk_lpm {
 	/* Use a spin lock to edit the FIB table. */
@@ -203,9 +239,6 @@ int setup_neighbor_tbl(unsigned int socket_id, int identifier,
 int setup_gk_lpm(struct gk_config *gk_conf, unsigned int socket_id);
 void destroy_neigh_hash_table(struct neighbor_hash_table *neigh);
 
-/*
- * TODO Add support for listing GK FIB entries.
- */
 int add_fib_entry_numerical(struct ip_prefix *prefix_info,
 	struct ipaddr *gt_addr, struct ipaddr *gw_addr,
 	enum gk_fib_action action, struct gk_config *gk_conf);
@@ -214,6 +247,13 @@ int add_fib_entry(const char *prefix, const char *gt_ip, const char *gw_ip,
 int del_fib_entry_numerical(
 	struct ip_prefix *prefix_info, struct gk_config *gk_conf);
 int del_fib_entry(const char *ip_prefix, struct gk_config *gk_conf);
+
+/*
+ * Callers of this function need to deallocate the
+ * struct gk_fib_dump_entry * that is returned using rte_free().
+ */
+struct gk_fib_dump_entry *list_fib_entries(struct gk_config *gk_conf,
+	uint32_t *num_entries);
 
 /* TODO Customize the hash function for IPv4. */
 
