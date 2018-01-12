@@ -19,6 +19,8 @@
 #include <string.h>
 #include <stdbool.h>
 #include <math.h>
+#include <linux/icmp.h>
+#include <linux/icmpv6.h>
 
 #include <rte_ip.h>
 #include <rte_log.h>
@@ -28,6 +30,7 @@
 #include <rte_memcpy.h>
 #include <rte_cycles.h>
 #include <rte_malloc.h>
+#include <rte_icmp.h>
 
 #include "gatekeeper_acl.h"
 #include "gatekeeper_gk.h"
@@ -37,6 +40,7 @@
 #include "gatekeeper_launch.h"
 #include "gatekeeper_l2.h"
 #include "gatekeeper_sol.h"
+#include "gatekeeper_lls.h"
 
 #define	START_PRIORITY		 (38)
 /* Set @START_ALLOWANCE as the double size of a large DNS reply. */
@@ -931,6 +935,197 @@ out:
 	return ret;
 }
 
+static inline unsigned short
+icmp_cksum(void *buf, int size)
+{
+	unsigned short *buffer = buf;
+	unsigned long cksum = 0;
+
+	while(size > 1) {
+		cksum += *buffer++;
+		size -= sizeof(unsigned short);
+	}
+
+	if(size)
+		cksum += *(unsigned char*)buffer;
+
+	cksum = (cksum >> 16) + (cksum & 0xffff);
+	cksum += (cksum >>16);
+
+	return (unsigned short)(~cksum);
+}
+
+static void
+xmit_icmp(struct ether_hdr *eth_hdr, struct ipv4_hdr *ipv4_hdr,
+	uint8_t port, uint16_t tx_queue, struct gk_config *gk_conf)
+{
+	struct ether_hdr *icmp_eth;
+	struct ipv4_hdr *icmp_ipv4;
+	struct icmp_hdr *icmph;
+
+	struct rte_mbuf *icmp_pkt = rte_pktmbuf_alloc(
+		gk_conf->net->gatekeeper_pktmbuf_pool[
+		rte_lcore_to_socket_id(rte_lcore_id())]);
+	if (icmp_pkt == NULL) {
+		RTE_LOG(ERR, MEMPOOL,
+			"gk: failed to allocate an ICMP packet!");
+		return;
+	}
+
+	icmp_eth = (struct ether_hdr *)rte_pktmbuf_append(icmp_pkt,
+		sizeof(struct ether_hdr) + sizeof(struct ipv4_hdr) +
+		sizeof(struct icmp_hdr));
+	if (icmp_eth == NULL) {
+		RTE_LOG(ERR, MBUF,
+			"Not enough headroom space in the first segment!\n");
+		return;
+	}
+
+	ether_addr_copy(&eth_hdr->s_addr, &icmp_eth->d_addr);
+	ether_addr_copy(&eth_hdr->d_addr, &icmp_eth->s_addr);
+	icmp_eth->ether_type = eth_hdr->ether_type;
+
+	icmp_ipv4 = (struct ipv4_hdr *)&icmp_eth[1];
+	icmp_ipv4->version_ihl = IP_VHL_DEF;
+	icmp_ipv4->type_of_service = 0;
+	icmp_ipv4->packet_id = 0;
+	icmp_ipv4->fragment_offset = IP_DN_FRAGMENT_FLAG;
+	icmp_ipv4->time_to_live = IP_DEFTTL;
+	icmp_ipv4->next_proto_id = IPPROTO_ICMP;
+	icmp_ipv4->src_addr = ipv4_hdr->dst_addr;
+	icmp_ipv4->dst_addr = ipv4_hdr->src_addr;
+	icmp_ipv4->total_length = rte_cpu_to_be_16(icmp_pkt->data_len);
+	/*
+	 * The IP header checksum filed must be set to 0
+	 * in order to offload the checksum calculation.
+	 */
+	icmp_ipv4->hdr_checksum = 0;
+	icmp_pkt->l2_len = sizeof(struct ether_hdr);
+	icmp_pkt->l3_len = sizeof(struct ipv4_hdr);
+	icmp_pkt->ol_flags |= PKT_TX_IPV4 | PKT_TX_IP_CKSUM;
+
+	icmph = (struct icmp_hdr *)&icmp_ipv4[1];
+	icmph->icmp_type = ICMP_TIME_EXCEEDED;
+	icmph->icmp_code = ICMP_EXC_TTL;
+	icmph->icmp_cksum = 0;
+	icmph->icmp_ident = 0;
+	icmph->icmp_seq_nb = 0;
+	icmph->icmp_cksum = icmp_cksum(icmph, sizeof(*icmph));
+
+	if (rte_eth_tx_burst(port, tx_queue, &icmp_pkt, 1) <= 0) {
+		rte_pktmbuf_free(icmp_pkt);
+		RTE_LOG(ERR, GATEKEEPER,
+			"gk: could not send an ICMP packet!\n");
+	}
+}
+
+static void
+xmit_icmpv6(struct ether_hdr *eth_hdr, struct ipv6_hdr *ipv6_hdr,
+	uint8_t port, uint16_t tx_queue, struct gk_config *gk_conf)
+{
+	struct ether_hdr *icmp_eth;
+	struct ipv6_hdr *icmp_ipv6;
+	struct icmpv6_hdr *icmpv6_hdr;
+
+	struct rte_mbuf *icmpv6_pkt = rte_pktmbuf_alloc(
+		gk_conf->net->gatekeeper_pktmbuf_pool[
+		rte_lcore_to_socket_id(rte_lcore_id())]);
+	if (icmpv6_pkt == NULL) {
+		RTE_LOG(ERR, MEMPOOL,
+			"gk: failed to allocate an ICMPv6 packet!");
+		return;
+	}
+
+	icmp_eth = (struct ether_hdr *)rte_pktmbuf_append(icmpv6_pkt,
+		sizeof(struct ether_hdr) + sizeof(struct ipv6_hdr) +
+		sizeof(struct icmpv6_hdr));
+	if (icmp_eth == NULL) {
+		RTE_LOG(ERR, MBUF,
+			"Not enough headroom space in the first segment!\n");
+		return;
+	}
+
+	ether_addr_copy(&eth_hdr->s_addr, &icmp_eth->d_addr);
+	ether_addr_copy(&eth_hdr->d_addr, &icmp_eth->s_addr);
+	icmp_eth->ether_type = eth_hdr->ether_type;
+
+	/* Set-up IPv6 header. */
+	icmp_ipv6 = (struct ipv6_hdr *)&eth_hdr[1];
+	icmp_ipv6->vtc_flow = rte_cpu_to_be_32(IPv6_DEFAULT_VTC_FLOW);
+	icmp_ipv6->payload_len = rte_cpu_to_be_16(sizeof(*icmpv6_hdr));
+	icmp_ipv6->proto = IPPROTO_ICMPV6;
+	icmp_ipv6->hop_limits = IPv6_DEFAULT_HOP_LIMITS;
+	rte_memcpy(icmp_ipv6->src_addr, ipv6_hdr->dst_addr,
+		sizeof(icmp_ipv6->src_addr));
+	rte_memcpy(icmp_ipv6->dst_addr, ipv6_hdr->src_addr,
+		sizeof(icmp_ipv6->dst_addr));
+
+	/* Set-up ICMPv6 header. */
+	icmpv6_hdr = (struct icmpv6_hdr *)&icmp_ipv6[1];
+	icmpv6_hdr->type = ICMPV6_TIME_EXCEED;
+	icmpv6_hdr->code = ICMPV6_EXC_HOPLIMIT;
+	icmpv6_hdr->cksum = 0; /* Calculated below. */
+
+	icmpv6_hdr->cksum = rte_ipv6_icmpv6_cksum(icmp_ipv6, icmpv6_hdr);
+
+	if (rte_eth_tx_burst(port, tx_queue, &icmpv6_pkt, 1) <= 0) {
+		rte_pktmbuf_free(icmpv6_pkt);
+		RTE_LOG(ERR, GATEKEEPER,
+			"gk: could not send an ICMPv6 packet!\n");
+	}
+}
+
+/*
+ * For IPv4, according to the RFC 1812 section 5.3.1 Time to Live (TTL),
+ * if the TTL is reduced to zero (or less), the packet MUST be
+ * discarded, and if the destination is not a multicast address the
+ * router MUST send an ICMP Time Exceeded message, Code 0 (TTL Exceeded
+ * in Transit) message to the source.
+ *
+ * For IPv6, according to the RFC 1883 section 4.4,
+ * if the IPv6 Hop Limit is less than or equal to 1, then the router needs to
+ * send an ICMP Time Exceeded -- Hop Limit Exceeded in Transit message to
+ * the Source Address and discard the packet.
+ */
+static int
+update_ip_hop_count(struct ipacket *packet,
+	uint8_t port, uint16_t tx_queue, struct gk_config *gk_conf)
+{
+	if (packet->flow.proto == ETHER_TYPE_IPv4) {
+		struct ipv4_hdr *ipv4_hdr =
+			rte_pktmbuf_mtod_offset(packet->pkt,
+			struct ipv4_hdr *, sizeof(struct ether_hdr));
+		if (ipv4_hdr->time_to_live <= 1) {
+			struct ether_hdr *eth_hdr = rte_pktmbuf_mtod(
+				packet->pkt, struct ether_hdr *);
+			xmit_icmp(eth_hdr, ipv4_hdr, port, tx_queue, gk_conf);
+			return -ETIMEDOUT;
+		}
+
+		--(ipv4_hdr->time_to_live);
+		++(ipv4_hdr->hdr_checksum);
+	} else if (likely(packet->flow.proto == ETHER_TYPE_IPv6)) {
+		struct ipv6_hdr *ipv6_hdr =
+			rte_pktmbuf_mtod_offset(packet->pkt,
+			struct ipv6_hdr *, sizeof(struct ether_hdr));
+		if (ipv6_hdr->hop_limits <= 1) {
+			struct ether_hdr *eth_hdr = rte_pktmbuf_mtod(
+				packet->pkt, struct ether_hdr *);
+			xmit_icmpv6(eth_hdr, ipv6_hdr, port, tx_queue, gk_conf);
+			return -ETIMEDOUT;
+		}
+
+		--(ipv6_hdr->hop_limits);
+	} else {
+		RTE_LOG(WARNING, GATEKEEPER,
+			"Unexpected condition at %s: unknown flow type %hu\n",
+			__func__, packet->flow.proto);
+		return -EINVAL;
+	}
+
+	return 0;
+}
+
 /* Process the packets on the front interface. */
 static void
 process_pkts_front(uint8_t port_front, uint8_t port_back,
@@ -945,6 +1140,7 @@ process_pkts_front(uint8_t port_front, uint8_t port_back,
 	uint16_t num_tx = 0;
 	uint16_t num_tx_succ;
 	uint16_t num_arp = 0;
+	uint16_t tx_queue_front = instance->tx_queue_front;
 	struct rte_mbuf *rx_bufs[GATEKEEPER_MAX_PKT_BURST];
 	struct rte_mbuf *tx_bufs[GATEKEEPER_MAX_PKT_BURST];
 	struct rte_mbuf *arp_bufs[GATEKEEPER_MAX_PKT_BURST];
@@ -1085,6 +1281,12 @@ process_pkts_front(uint8_t port_front, uint8_t port_back,
 					continue;
 				}
 
+				if (update_ip_hop_count(&packet, port_front,
+						tx_queue_front, gk_conf) < 0) {
+					drop_packet(pkt);
+					continue;
+				}
+
 				tx_bufs[num_tx++] = pkt;
 				continue;
 			}
@@ -1111,6 +1313,12 @@ process_pkts_front(uint8_t port_front, uint8_t port_back,
 						pkt_copy_cached_eth_header(pkt,
 							eth_cache,
 							back->l2_len_out)) {
+					drop_packet(pkt);
+					continue;
+				}
+
+				if (update_ip_hop_count(&packet, port_front,
+						tx_queue_front, gk_conf) < 0) {
 					drop_packet(pkt);
 					continue;
 				}
@@ -1183,8 +1391,9 @@ process_pkts_front(uint8_t port_front, uint8_t port_back,
 /* Process the packets on the back interface. */
 static void
 process_pkts_back(uint8_t port_back, uint8_t port_front,
-	uint16_t rx_queue_back, uint16_t tx_queue_front,
-	unsigned int lcore, struct gk_config *gk_conf)
+	uint16_t rx_queue_back, uint16_t tx_queue_back,
+	uint16_t tx_queue_front, unsigned int lcore,
+	struct gk_config *gk_conf)
 {
 	/* Get burst of RX packets, from first port of pair. */
 	int i;
@@ -1267,6 +1476,12 @@ process_pkts_back(uint8_t port_back, uint8_t port_front,
 				continue;
 			}
 
+			if (update_ip_hop_count(&packet, port_back,
+					tx_queue_back, gk_conf) < 0) {
+				drop_packet(pkt);
+				continue;
+			}
+
 			tx_bufs[num_tx++] = pkt;
 			continue;
 		}
@@ -1293,6 +1508,12 @@ process_pkts_back(uint8_t port_back, uint8_t port_front,
 					pkt_copy_cached_eth_header(pkt,
 						eth_cache,
 						front->l2_len_out)) {
+				drop_packet(pkt);
+				continue;
+			}
+
+			if (update_ip_hop_count(&packet, port_back,
+					tx_queue_back, gk_conf) < 0) {
 				drop_packet(pkt);
 				continue;
 			}
@@ -1386,8 +1607,8 @@ gk_proc(void *arg)
 			lcore, instance, gk_conf);
 
 		process_pkts_back(port_back, port_front,
-			rx_queue_back, tx_queue_front,
-			lcore, gk_conf);
+			rx_queue_back, tx_queue_back,
+			tx_queue_front, lcore, gk_conf);
 
 		process_cmds_from_mailbox(instance, gk_conf);
 
